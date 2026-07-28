@@ -1,9 +1,13 @@
-import { Agent } from "@mastra/core/agent";
+import { LlmAgent } from "@google/adk";
 
-export const chapterContentAgent = new Agent({
-  name: "chapter-content-agent",
-  model: "openrouter/openai/gpt-4.1-mini",
-  instructions: `You are a talented creative writer specializing in chapter writing for novels and stories.
+import { WRITER_MODEL } from "../models";
+
+export const chapterWriterAgent = new LlmAgent({
+  name: "chapter-writer-agent",
+  model: WRITER_MODEL,
+  description:
+    "Writes the full prose of a single chapter from its title, premise, and context.",
+  instruction: `You are a talented creative writer specializing in chapter writing for novels and stories.
 
 Given a chapter title, premise, and context, you write engaging, well-crafted chapter content.
 

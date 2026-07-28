@@ -61,6 +61,46 @@ export interface ChapterContentEventData {
   title: string;
 }
 
+/**
+ * What publishing actually needs from a finished book.
+ *
+ * Narrower than `storyResultSchema` on purpose: the client reassembles this
+ * from the stream, where chapters carry no `premise`, and the published
+ * markdown never uses one. `StoryResult` satisfies this shape.
+ */
+export const publishableStorySchema = z.object({
+  storyTitle: z.string(),
+  chapters: z.array(
+    z.object({
+      chapterNumber: z.number(),
+      title: z.string(),
+      content: z.string(),
+    }),
+  ),
+  totalChapters: z.number(),
+});
+
+export type PublishableStory = z.infer<typeof publishableStorySchema>;
+
+export type PublishTargetId = "notion" | "google-docs";
+
+/** One MCP tool invocation, surfaced so the UI can show the agent's work. */
+export interface PublishToolCall {
+  /** The MCP tool name, e.g. `API-post-page` or `create_google_doc`. */
+  name: string;
+  status: "running" | "completed" | "failed";
+}
+
+export interface PublishEventData {
+  target: PublishTargetId;
+  status: "publishing" | "completed" | "failed" | "skipped";
+  toolCalls: PublishToolCall[];
+  /** Set once the published page or document exists. */
+  documentUrl?: string;
+  /** Failure reason, or why the target was unavailable. */
+  message?: string;
+}
+
 export type StoryWorkflowUIMessage = UIMessage<
   unknown,
   {

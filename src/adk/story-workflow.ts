@@ -18,15 +18,34 @@ import {
 import { chapterPlannerAgent } from "./agents/chapter-planner-agent";
 import { chapterWriterAgent } from "./agents/chapter-writer-agent";
 
+// === INTÉGRATION ADK — CŒUR DU WORKFLOW ===
+//
+// Ce fichier est le point central où l'Agent Development Kit (ADK) de Google
+// est utilisé pour orchestrer la génération du livre. Trois briques ADK
+// interviennent ici :
+//   1. `LlmAgent`  — défini dans agents/*.ts, c'est la config d'un agent
+//                    (modèle, instructions, éventuellement un schéma de sortie).
+//   2. `Runner`    — exécute un `LlmAgent` : il envoie le prompt au modèle
+//                    (Gemini) et retourne un flux d'`Event` (deltas de texte,
+//                    appels d'outils, erreurs...).
+//   3. `SessionService` — stocke l'historique de conversation entre les tours.
+//                    Ici on utilise `InMemorySessionService` (en RAM, perdu au
+//                    redémarrage) et on crée/supprime une session jetable à
+//                    chaque appel, puisqu'on n'a pas besoin de mémoriser quoi
+//                    que ce soit entre deux générations de livre.
+
 const APP_NAME = "story-book-workflow";
 const USER_ID = "story-book-user";
 
 /** Matches the `concurrency: 10` the Mastra `.foreach` step used. */
 const CHAPTER_CONCURRENCY = 10;
 
-// Sessions are created and deleted per run, so these are safe to share.
+// Le SessionService est partagé par toute l'app : il ne fait que gérer des
+// sessions vides et jetables, donc aucun risque à le garder en module-scope.
 const sessionService = new InMemorySessionService();
 
+// Un `Runner` = un agent + un service de session. On en crée un par agent
+// (planificateur / rédacteur) et on les réutilise pour chaque requête HTTP.
 const plannerRunner = new Runner({
   appName: APP_NAME,
   agent: chapterPlannerAgent,
@@ -63,6 +82,9 @@ export interface RunStoryWorkflowOptions {
   abortSignal?: AbortSignal;
 }
 
+// Un `Event` ADK représente un tour du modèle. Son `content.parts` est une
+// liste de morceaux (texte, appel d'outil, réponse d'outil...) — ici on ne
+// s'intéresse qu'au texte, donc on concatène uniquement les `part.text`.
 function textOf(event: Event): string {
   return (
     event.content?.parts
@@ -82,6 +104,9 @@ async function* streamAgentText(
   prompt: string,
   abortSignal?: AbortSignal,
 ): AsyncGenerator<{ text: string; done: boolean }> {
+  // Une session ADK = un identifiant de conversation. Comme chaque appel est
+  // indépendant (pas de suivi de dialogue), on en crée une, on l'utilise une
+  // fois, puis on la détruit dans le `finally`.
   const session = await sessionService.createSession({
     appName: APP_NAME,
     userId: USER_ID,
@@ -90,6 +115,10 @@ async function* streamAgentText(
   let accumulated = "";
 
   try {
+    // `runner.runAsync(...)` est l'appel ADK qui déclenche réellement la
+    // requête au modèle Gemini et retourne un `AsyncGenerator<Event>`.
+    // `runConfig.streamingMode: SSE` demande à ADK de streamer les deltas de
+    // texte au fur et à mesure plutôt que d'attendre la réponse complète.
     for await (const event of runner.runAsync({
       userId: USER_ID,
       sessionId: session.id,
@@ -106,12 +135,18 @@ async function* streamAgentText(
       const text = textOf(event);
       if (!text) continue;
 
+      // `event.partial === true` → c'est un delta (fragment) à ajouter au
+      // texte déjà reçu. `event.partial === false/undefined` → c'est
+      // l'événement final du tour, qui contient le texte complet et
+      // remplace donc le buffer accumulé (au lieu de le concaténer).
       if (event.partial) accumulated += text;
       else accumulated = text;
 
       yield { text: accumulated, done: !event.partial };
     }
   } finally {
+    // Nettoyage systématique de la session jetable, même en cas d'erreur ou
+    // d'annulation (abortSignal).
     await sessionService.deleteSession({
       appName: APP_NAME,
       userId: USER_ID,
@@ -152,6 +187,11 @@ async function planChapters({
 
   let plan: Partial<StoryPlan> = {};
 
+  // On utilise le `plannerRunner`, dont l'agent (chapter-planner-agent.ts)
+  // a un `outputSchema` : ADK force donc Gemini à répondre en JSON strict.
+  // Comme le JSON arrive par fragments, `parsePartialJson` tente de le
+  // parser à chaque delta, même incomplet, pour afficher le plan au fur et
+  // à mesure côté UI.
   for await (const { text } of streamAgentText(
     plannerRunner,
     prompt,
@@ -222,6 +262,9 @@ async function writeChapter(
   const id = `chapter-${chapterNumber}-content`;
   let content = "";
 
+  // Même mécanique que planChapters, mais avec le `writerRunner` (agent sans
+  // outputSchema) : ici le texte streamé est directement de la prose, pas du
+  // JSON à parser.
   for await (const { text } of streamAgentText(
     writerRunner,
     prompt,
@@ -270,20 +313,32 @@ async function mapWithConcurrency<T, R>(
 /**
  * Plans a story, then writes every chapter in parallel — the ADK equivalent of
  * the Mastra `.then(plan).foreach(write, { concurrency: 10 })` workflow.
+ *
+ * Publishing is deliberately not part of this: the reader chooses a destination
+ * once the book exists, and `src/adk/publishing/` handles it from there.
  */
 export async function runStoryWorkflow(
   options: RunStoryWorkflowOptions,
 ): Promise<StoryResult> {
   const { writer, abortSignal } = options;
 
+  // Étape 1 (ADK) : le `plannerRunner` génère le plan du livre (titre +
+  // structure des chapitres) via Gemini, en streaming JSON.
   const plan = await planChapters(options);
 
+  // Étape 2 (ADK) : le `writerRunner` rédige chaque chapitre. Chaque appel à
+  // `writeChapter` crée sa propre session ADK jetable (voir streamAgentText),
+  // donc les chapitres peuvent tourner en parallèle sans se marcher dessus —
+  // au plus `CHAPTER_CONCURRENCY` (10) en même temps.
   const chapters = await mapWithConcurrency(
     plan.chapters,
     CHAPTER_CONCURRENCY,
     (chapter) => writeChapter(chapter, writer, abortSignal),
   );
 
+  // Note : aucune connexion MCP ici. La publication (Notion / Google Docs,
+  // qui elle utilise MCP) n'est déclenchée qu'après, à la demande de
+  // l'utilisateur — voir src/adk/publishing/publish.ts.
   return {
     storyTitle: plan.storyTitle,
     chapters,

@@ -165,7 +165,7 @@ export function StoryInput({ onGenerate }: StoryInputProps) {
         transition={{ delay: 0.8 }}
         className="absolute bottom-8 left-1/2 -translate-x-1/2 text-muted-foreground/30 text-sm tracking-widest uppercase"
       >
-        Storyweaver
+        Mohamed Dhibou
       </motion.div>
     </div>
   );

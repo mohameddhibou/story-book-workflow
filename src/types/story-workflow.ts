@@ -1,5 +1,4 @@
 import { z } from "zod";
-import type { WorkflowDataPart } from "@mastra/ai-sdk";
 import { UIMessage } from "ai";
 
 export const chapterInfoSchema = z.object({
@@ -68,6 +67,5 @@ export type StoryWorkflowUIMessage = UIMessage<
     "chapter-generation": ChapterGenerationEventData;
     "chapter-content-generation": ChapterContentEventData;
     "number-of-chapters": { count: number };
-    workflow: WorkflowDataPart;
   }
 >;
